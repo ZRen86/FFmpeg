@@ -57,7 +57,7 @@ static const AVCodecTag codec_au_tags[] = {
 
 #if CONFIG_AU_DEMUXER
 
-static int au_probe(AVProbeData *p)
+static int au_probe(const AVProbeData *p)
 {
     if (p->buf[0] == '.' && p->buf[1] == 's' &&
         p->buf[2] == 'n' && p->buf[3] == 'd')
@@ -81,7 +81,7 @@ static int au_read_annotation(AVFormatContext *s, int size)
     AVBPrint bprint;
     char * key = NULL;
     char * value = NULL;
-    int i;
+    int ret, i;
 
     av_bprint_init(&bprint, 64, AV_BPRINT_SIZE_UNLIMITED);
 
@@ -92,7 +92,9 @@ static int au_read_annotation(AVFormatContext *s, int size)
             if (c == '\0') {
                 state = PARSE_FINISHED;
             } else if (c == '=') {
-                av_bprint_finalize(&bprint, &key);
+                ret = av_bprint_finalize(&bprint, &key);
+                if (ret < 0)
+                    return ret;
                 av_bprint_init(&bprint, 64, AV_BPRINT_SIZE_UNLIMITED);
                 state = PARSE_VALUE;
             } else {
@@ -140,9 +142,10 @@ static int au_read_header(AVFormatContext *s)
     unsigned int tag;
     AVIOContext *pb = s->pb;
     unsigned int id, channels, rate;
-    int bps;
+    int bps, ba = 0;
     enum AVCodecID codec;
     AVStream *st;
+    int ret;
 
     tag = avio_rl32(pb);
     if (tag != MKTAG('.', 's', 'n', 'd'))
@@ -161,7 +164,9 @@ static int au_read_header(AVFormatContext *s)
 
     if (size > 24) {
         /* parse annotation field to get metadata */
-        au_read_annotation(s, size - 24);
+        ret = au_read_annotation(s, size - 24);
+        if (ret < 0)
+            return ret;
     }
 
     codec = ff_codec_get_id(codec_au_tags, id);
@@ -178,6 +183,7 @@ static int au_read_header(AVFormatContext *s)
         } else {
             const uint8_t bpcss[] = {4, 0, 3, 5};
             av_assert0(id >= 23 && id < 23 + 4);
+            ba = bpcss[id - 23];
             bps = bpcss[id - 23];
         }
     } else if (!bps) {
@@ -205,7 +211,7 @@ static int au_read_header(AVFormatContext *s)
     st->codecpar->sample_rate = rate;
     st->codecpar->bits_per_coded_sample = bps;
     st->codecpar->bit_rate    = channels * rate * bps;
-    st->codecpar->block_align = FFMAX(bps * st->codecpar->channels / 8, 1);
+    st->codecpar->block_align = ba ? ba : FFMAX(bps * st->codecpar->channels / 8, 1);
     if (data_size != AU_UNKNOWN_SIZE)
         st->duration = (((int64_t)data_size)<<3) / (st->codecpar->channels * (int64_t)bps);
 
@@ -310,7 +316,6 @@ static int au_write_header(AVFormatContext *s)
     } else {
         avio_wb64(pb, 0); /* annotation field */
     }
-    avio_flush(pb);
 
     return 0;
 }
@@ -326,7 +331,6 @@ static int au_write_trailer(AVFormatContext *s)
         avio_seek(pb, 8, SEEK_SET);
         avio_wb32(pb, (uint32_t)(file_size - au->header_size));
         avio_seek(pb, file_size, SEEK_SET);
-        avio_flush(pb);
     }
 
     return 0;

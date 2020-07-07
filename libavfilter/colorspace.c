@@ -17,6 +17,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavutil/frame.h"
+#include "libavutil/mastering_display_metadata.h"
+#include "libavutil/pixdesc.h"
+
 #include "colorspace.h"
 
 
@@ -88,4 +92,117 @@ void ff_fill_rgb2xyz_table(const struct PrimaryCoefficients *coeffs,
     rgb2xyz[2][0] *= sr;
     rgb2xyz[2][1] *= sg;
     rgb2xyz[2][2] *= sb;
+}
+static const double ycgco_matrix[3][3] =
+{
+    {  0.25, 0.5,  0.25 },
+    { -0.25, 0.5, -0.25 },
+    {  0.5,  0,   -0.5  },
+};
+
+static const double gbr_matrix[3][3] =
+{
+    { 0,    1,   0   },
+    { 0,   -0.5, 0.5 },
+    { 0.5, -0.5, 0   },
+};
+
+/*
+ * All constants explained in e.g. https://linuxtv.org/downloads/v4l-dvb-apis/ch02s06.html
+ * The older ones (bt470bg/m) are also explained in their respective ITU docs
+ * (e.g. https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.470-5-199802-S!!PDF-E.pdf)
+ * whereas the newer ones can typically be copied directly from wikipedia :)
+ */
+static const struct LumaCoefficients luma_coefficients[AVCOL_SPC_NB] = {
+    [AVCOL_SPC_FCC]        = { 0.30,   0.59,   0.11   },
+    [AVCOL_SPC_BT470BG]    = { 0.299,  0.587,  0.114  },
+    [AVCOL_SPC_SMPTE170M]  = { 0.299,  0.587,  0.114  },
+    [AVCOL_SPC_BT709]      = { 0.2126, 0.7152, 0.0722 },
+    [AVCOL_SPC_SMPTE240M]  = { 0.212,  0.701,  0.087  },
+    [AVCOL_SPC_YCOCG]      = { 0.25,   0.5,    0.25   },
+    [AVCOL_SPC_RGB]        = { 1,      1,      1      },
+    [AVCOL_SPC_BT2020_NCL] = { 0.2627, 0.6780, 0.0593 },
+    [AVCOL_SPC_BT2020_CL]  = { 0.2627, 0.6780, 0.0593 },
+};
+
+const struct LumaCoefficients *ff_get_luma_coefficients(enum AVColorSpace csp)
+{
+    const struct LumaCoefficients *coeffs;
+
+    if (csp >= AVCOL_SPC_NB)
+        return NULL;
+    coeffs = &luma_coefficients[csp];
+    if (!coeffs->cr)
+        return NULL;
+
+    return coeffs;
+}
+
+void ff_fill_rgb2yuv_table(const struct LumaCoefficients *coeffs,
+                           double rgb2yuv[3][3])
+{
+    double bscale, rscale;
+
+    // special ycgco matrix
+    if (coeffs->cr == 0.25 && coeffs->cg == 0.5 && coeffs->cb == 0.25) {
+        memcpy(rgb2yuv, ycgco_matrix, sizeof(double) * 9);
+        return;
+    } else if (coeffs->cr == 1 && coeffs->cg == 1 && coeffs->cb == 1) {
+        memcpy(rgb2yuv, gbr_matrix, sizeof(double) * 9);
+        return;
+    }
+
+    rgb2yuv[0][0] = coeffs->cr;
+    rgb2yuv[0][1] = coeffs->cg;
+    rgb2yuv[0][2] = coeffs->cb;
+    bscale = 0.5 / (coeffs->cb - 1.0);
+    rscale = 0.5 / (coeffs->cr - 1.0);
+    rgb2yuv[1][0] = bscale * coeffs->cr;
+    rgb2yuv[1][1] = bscale * coeffs->cg;
+    rgb2yuv[1][2] = 0.5;
+    rgb2yuv[2][0] = 0.5;
+    rgb2yuv[2][1] = rscale * coeffs->cg;
+    rgb2yuv[2][2] = rscale * coeffs->cb;
+}
+
+double ff_determine_signal_peak(AVFrame *in)
+{
+    AVFrameSideData *sd = av_frame_get_side_data(in, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+    double peak = 0;
+
+    if (sd) {
+        AVContentLightMetadata *clm = (AVContentLightMetadata *)sd->data;
+        peak = clm->MaxCLL / REFERENCE_WHITE;
+    }
+
+    sd = av_frame_get_side_data(in, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+    if (!peak && sd) {
+        AVMasteringDisplayMetadata *metadata = (AVMasteringDisplayMetadata *)sd->data;
+        if (metadata->has_luminance)
+            peak = av_q2d(metadata->max_luminance) / REFERENCE_WHITE;
+    }
+
+    // For untagged source, use peak of 10000 if SMPTE ST.2084
+    // otherwise assume HLG with reference display peak 1000.
+    if (!peak)
+        peak = in->color_trc == AVCOL_TRC_SMPTE2084 ? 100.0f : 10.0f;
+
+    return peak;
+}
+
+void ff_update_hdr_metadata(AVFrame *in, double peak)
+{
+    AVFrameSideData *sd = av_frame_get_side_data(in, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+
+    if (sd) {
+        AVContentLightMetadata *clm = (AVContentLightMetadata *)sd->data;
+        clm->MaxCLL = (unsigned)(peak * REFERENCE_WHITE);
+    }
+
+    sd = av_frame_get_side_data(in, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+    if (sd) {
+        AVMasteringDisplayMetadata *metadata = (AVMasteringDisplayMetadata *)sd->data;
+        if (metadata->has_luminance)
+            metadata->max_luminance = av_d2q(peak * REFERENCE_WHITE, 10000);
+    }
 }

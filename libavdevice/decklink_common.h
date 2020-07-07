@@ -24,9 +24,16 @@
 #define AVDEVICE_DECKLINK_COMMON_H
 
 #include <DeckLinkAPIVersion.h>
+#if BLACKMAGIC_DECKLINK_API_VERSION < 0x0b000000
+#define IID_IDeckLinkProfileAttributes IID_IDeckLinkAttributes
+#define IDeckLinkProfileAttributes IDeckLinkAttributes
+#endif
 
 #include "libavutil/thread.h"
 #include "decklink_common_c.h"
+#if CONFIG_LIBKLVANC
+#include "libklvanc/vanc.h"
+#endif
 
 #ifdef _WIN32
 #define DECKLINK_BOOL BOOL
@@ -84,7 +91,7 @@ struct decklink_ctx {
     IDeckLinkOutput *dlo;
     IDeckLinkInput *dli;
     IDeckLinkConfiguration *cfg;
-    IDeckLinkAttributes *attr;
+    IDeckLinkProfileAttributes *attr;
     decklink_output_callback *output_callback;
 
     /* DeckLink mode information */
@@ -97,6 +104,7 @@ struct decklink_ctx {
     int bmd_width;
     int bmd_height;
     int bmd_field_dominance;
+    int supports_vanc;
 
     /* Capture buffer queue */
     AVPacketQueue queue;
@@ -107,23 +115,26 @@ struct decklink_ctx {
 
     /* Status */
     int playback_started;
-    int capture_started;
     int64_t last_pts;
     unsigned long frameCount;
     unsigned int dropped;
     AVStream *audio_st;
     AVStream *video_st;
+    AVStream *klv_st;
     AVStream *teletext_st;
+    uint16_t cdp_sequence_num;
 
     /* Options */
     int list_devices;
     int list_formats;
+    int enable_klv;
     int64_t teletext_lines;
     double preroll;
     int duplex_mode;
     DecklinkPtsSource audio_pts_source;
     DecklinkPtsSource video_pts_source;
     int draw_bars;
+    BMDPixelFormat raw_format;
 
     int frames_preroll;
     int frames_buffer;
@@ -133,8 +144,13 @@ struct decklink_ctx {
     int frames_buffer_available_spots;
     int autodetect;
 
+#if CONFIG_LIBKLVANC
+    struct klvanc_context_s *vanc_ctx;
+#endif
+
     int channels;
     int audio_depth;
+    unsigned long tc_seen;    // used with option wait_for_tc
 };
 
 typedef enum { DIRECTION_IN, DIRECTION_OUT} decklink_direction_t;
@@ -181,10 +197,9 @@ static const BMDTimecodeFormat decklink_timecode_format_map[] = {
     bmdTimecodeSerial,
 };
 
-HRESULT ff_decklink_get_display_name(IDeckLink *This, const char **displayName);
 int ff_decklink_set_configs(AVFormatContext *avctx, decklink_direction_t direction);
-int ff_decklink_set_format(AVFormatContext *avctx, int width, int height, int tb_num, int tb_den, enum AVFieldOrder field_order, decklink_direction_t direction = DIRECTION_OUT, int num = 0);
-int ff_decklink_set_format(AVFormatContext *avctx, decklink_direction_t direction, int num);
+int ff_decklink_set_format(AVFormatContext *avctx, int width, int height, int tb_num, int tb_den, enum AVFieldOrder field_order, decklink_direction_t direction = DIRECTION_OUT);
+int ff_decklink_set_format(AVFormatContext *avctx, decklink_direction_t direction);
 int ff_decklink_list_devices(AVFormatContext *avctx, struct AVDeviceInfoList *device_list, int show_inputs, int show_outputs);
 void ff_decklink_list_devices_legacy(AVFormatContext *avctx, int show_inputs, int show_outputs);
 int ff_decklink_list_formats(AVFormatContext *avctx, decklink_direction_t direction = DIRECTION_OUT);
